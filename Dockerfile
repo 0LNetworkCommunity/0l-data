@@ -2,10 +2,11 @@
 
 FROM ubuntu:22.04 as builder
 
-RUN apt update -y
+RUN apt update
 RUN apt install -y \
-    build-essential \
-    clang lld curl
+      build-essential \
+      clang lld curl \
+      libssl-dev pkg-config
 
 # Disable incremental compilation to avoid overhead. We are not preserving these files anyway.
 ENV CARGO_INCREMENTAL="0"
