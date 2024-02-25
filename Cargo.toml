@@ -1,0 +1,29 @@
+[package]
+name = "ol-data"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.11" }
+axum = "0.7"
+tower-http = { version = "0.5", features = ["trace", "cors", "compression-full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_urlencoded = "0.7"
+serde_json = "1.0"
+
+chrono = { version = "0.4" }
+arrow = { version = "50.0.0", features = ["prettyprint"] }
+arrow-array = { version = "50.0.0", default-features = false, features = ["chrono-tz"] }
+arrow-buffer = { version = "50.0.0", default-features = false }
+arrow-flight = { version = "50.0.0", features = ["flight-sql-experimental"] }
+arrow-ipc = { version = "50.0.0", default-features = false, features = ["lz4"] }
+arrow-ord = { version = "50.0.0", default-features = false }
+arrow-schema = { version = "50.0.0", default-features = false }
+datafusion = { version = "35" }
+parquet = { version = "50.0.0" }
+
+ethereum-types = "0.14"
+hex = "0.4"
