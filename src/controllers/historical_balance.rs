@@ -17,6 +17,7 @@ use crate::{app_state::AppState, V0_TIMESTAMP};
 #[derive(Serialize, Deserialize)]
 struct Response {
     timestamp: Vec<u64>,
+    version: Vec<u64>,
     unlocked: Vec<u64>,
     balance: Vec<u64>,
     locked: Vec<u64>,
@@ -39,7 +40,8 @@ async fn get_slow_wallet(app_state: &AppState, address: &str) -> MemTable {
             r#"
                 SELECT
                     toUInt64(tupleElement("entry", 2)) AS "unlocked",
-                    tupleElement("entry", 4) AS "time"
+                    tupleElement("entry", 3) AS "time",
+                    tupleElement("entry", 4) AS "version"
                 FROM (
                     SELECT
                         arrayElement(
@@ -49,8 +51,8 @@ async fn get_slow_wallet(app_state: &AppState, address: &str) -> MemTable {
                                     tuple(
                                         "change_index",
                                         "unlocked",
-                                        "transferred",
-                                        toUInt64(ceil("timestamp" / 1e6))
+                                        toUInt64(ceil("timestamp" / 1e6)),
+                                        "version"
                                     )
                                 )
                             ),
@@ -59,8 +61,8 @@ async fn get_slow_wallet(app_state: &AppState, address: &str) -> MemTable {
                     FROM "slow_wallet"
                     WHERE
                         "address" = reinterpretAsUInt256(reverse(unhex({address:String})))
-                    GROUP BY ceil("timestamp" / 1e6)
-                    ORDER BY ceil("timestamp" / 1e6) ASC
+                    GROUP BY "version"
+                    ORDER BY "version" ASC
                 )
                 FORMAT Parquet
             "#,
@@ -86,6 +88,7 @@ async fn get_slow_wallet(app_state: &AppState, address: &str) -> MemTable {
     let schema = Schema::new(vec![
         Field::new("unlocked", DataType::UInt64, false),
         Field::new("time", DataType::UInt64, false),
+        Field::new("version", DataType::UInt64, false),
     ]);
 
     MemTable::try_new(Arc::new(schema), vec![batches]).unwrap()
@@ -100,6 +103,7 @@ async fn get_historical_balance(app_state: &AppState, address: &str) -> MemTable
     let qs = serde_urlencoded::to_string(params).unwrap();
 
     let client = reqwest::Client::new();
+
     let res = client
         .post(format!("{}/?{}", app_state.clickhouse_host.clone(), qs))
         .header("X-ClickHouse-User", app_state.clickhouse_username.clone())
@@ -108,7 +112,8 @@ async fn get_historical_balance(app_state: &AppState, address: &str) -> MemTable
             r#"
                 SELECT
                     toUInt64(tupleElement("entry", 2)) AS "value",
-                    tupleElement("entry", 3) AS "time"
+                    tupleElement("entry", 3) AS "version",
+                    tupleElement("entry", 4) AS "time"
                 FROM (
                     SELECT
                         arrayElement(
@@ -118,6 +123,7 @@ async fn get_historical_balance(app_state: &AppState, address: &str) -> MemTable
                                     tuple(
                                         "change_index",
                                         "balance",
+                                        "version",
                                         toUInt64(ceil("timestamp" / 1e6))
                                     )
                                 )
@@ -127,8 +133,8 @@ async fn get_historical_balance(app_state: &AppState, address: &str) -> MemTable
                     FROM "coin_balance"
                     WHERE
                         "address" = reinterpretAsUInt256(reverse(unhex({address:String})))
-                    GROUP BY ceil("timestamp" / 1e6)
-                    ORDER BY ceil("timestamp" / 1e6) ASC
+                    GROUP BY "version"
+                    ORDER BY "version" ASC
                 )
                 FORMAT Parquet
             "#,
@@ -153,6 +159,7 @@ async fn get_historical_balance(app_state: &AppState, address: &str) -> MemTable
 
     let schema = Schema::new(vec![
         Field::new("value", DataType::UInt64, false),
+        Field::new("version", DataType::UInt64, false),
         Field::new("time", DataType::UInt64, false),
     ]);
 
@@ -202,6 +209,11 @@ pub async fn get(
                 col("slow_wallet.time"),
             ])
             .alias("time"),
+            coalesce(vec![
+                col("historical_balance.version"),
+                col("slow_wallet.version"),
+            ])
+            .alias("version"),
             col("unlocked"),
             col("historical_balance.value").alias("balance"),
         ])
@@ -214,6 +226,7 @@ pub async fn get(
 
     let schema = Schema::new(vec![
         Field::new("time", DataType::UInt64, false),
+        Field::new("version", DataType::UInt64, false),
         Field::new("unlocked", DataType::UInt64, true),
         Field::new("balance", DataType::UInt64, true),
     ]);
@@ -232,8 +245,16 @@ pub async fn get(
                 .values()
                 .to_vec();
 
-            let unlocked_in = batch
+            let version = batch
                 .column(1)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast time")
+                .values()
+                .to_vec();
+
+            let unlocked_in = batch
+                .column(2)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("Failed to downcast unlocked")
@@ -241,7 +262,7 @@ pub async fn get(
                 .collect::<Vec<Option<u64>>>();
 
             let balance_in = batch
-                .column(2)
+                .column(3)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("Failed to downcast balance")
@@ -277,6 +298,7 @@ pub async fn get(
                 Arc::new(schema.clone()),
                 vec![
                     Arc::new(UInt64Array::from(timestamp)),
+                    Arc::new(UInt64Array::from(version)),
                     Arc::new(UInt64Array::from(unlocked_out)),
                     Arc::new(UInt64Array::from(balance_out)),
                 ],
@@ -316,7 +338,8 @@ pub async fn get(
                             WHEN "unlocked" > "balance" THEN "balance"
                             ELSE "unlocked"
                         END
-                    ) as "locked"
+                    ) as "locked",
+                    "version"
                 FROM "history"
             "#,
         )
@@ -326,6 +349,7 @@ pub async fn get(
     let mut timestamp = Vec::new();
     let mut unlocked = Vec::new();
     let mut locked = Vec::new();
+    let mut version = Vec::new();
     let mut balance = Vec::new();
 
     for batch in df.collect().await.unwrap() {
@@ -368,6 +392,16 @@ pub async fn get(
                 .values()
                 .to_vec(),
         );
+
+        version.append(
+            &mut batch
+                .column(4)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast balance")
+                .values()
+                .to_vec(),
+        );
     }
 
     for i in 0..timestamp.len() {
@@ -387,6 +421,7 @@ pub async fn get(
                 unlocked,
                 balance,
                 locked,
+                version,
             })
             .unwrap(),
         )
