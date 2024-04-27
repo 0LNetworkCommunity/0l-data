@@ -19,7 +19,7 @@ use ethereum_types::U256;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Serialize;
 
-use crate::{app_state::AppState, V0_TIMESTAMP};
+use crate::app_state::AppState;
 
 async fn get_slow_wallet_balances(app_state: &AppState) -> MemTable {
     let params = &[("database", app_state.clickhouse_database.clone())];
@@ -34,7 +34,7 @@ async fn get_slow_wallet_balances(app_state: &AppState) -> MemTable {
         .body(
             r#"
                 SELECT
-                    tupleElement("entry", 2) AS "time",
+                    tupleElement("entry", 2) AS "version",
                     toUInt64(tupleElement("entry", 3)) AS "value",
                     tupleElement("entry", 4) AS "address"
                 FROM (
@@ -45,7 +45,7 @@ async fn get_slow_wallet_balances(app_state: &AppState) -> MemTable {
                                 groupArray(
                                     tuple(
                                         "change_index",
-                                        toUInt64(ceil("timestamp" / 1e6)),
+                                        "version",
                                         "balance",
                                         "address"
                                     )
@@ -62,10 +62,10 @@ async fn get_slow_wallet_balances(app_state: &AppState) -> MemTable {
                         )
                     GROUP BY
                         "address",
-                        ceil("timestamp" / 1e6)
+                        "version"
                     ORDER BY
                         "address",
-                        ceil("timestamp" / 1e6) ASC
+                        "version" ASC
                 )
                 FORMAT Parquet
             "#,
@@ -89,7 +89,7 @@ async fn get_slow_wallet_balances(app_state: &AppState) -> MemTable {
         .collect::<Vec<RecordBatch>>();
 
     let schema = Schema::new(vec![
-        Field::new("time", DataType::UInt64, false),
+        Field::new("version", DataType::UInt64, false),
         Field::new("value", DataType::UInt64, false),
         Field::new("address", DataType::FixedSizeBinary(32), false),
     ]);
@@ -111,7 +111,7 @@ async fn get_slow_wallet(app_state: &AppState) -> MemTable {
             r#"
                 SELECT
                     toUInt64(tupleElement("entry", 2)) AS "unlocked",
-                    tupleElement("entry", 3) AS "time",
+                    tupleElement("entry", 3) AS "version",
                     tupleElement("entry", 4) AS "address"
                 FROM (
                     SELECT
@@ -122,7 +122,7 @@ async fn get_slow_wallet(app_state: &AppState) -> MemTable {
                                     tuple(
                                         "change_index",
                                         "unlocked",
-                                        toUInt64(ceil("timestamp" / 1e6)),
+                                        "version",
                                         "address"
                                     )
                                 )
@@ -132,10 +132,10 @@ async fn get_slow_wallet(app_state: &AppState) -> MemTable {
                     FROM "slow_wallet"
                     GROUP BY
                       "address",
-                      ceil("timestamp" / 1e6)
+                      "version"
                     ORDER BY
                       "address",
-                      ceil("timestamp" / 1e6) ASC
+                      "version" ASC
                 )
                 FORMAT Parquet
             "#,
@@ -160,7 +160,7 @@ async fn get_slow_wallet(app_state: &AppState) -> MemTable {
 
     let schema = Schema::new(vec![
         Field::new("unlocked", DataType::UInt64, false),
-        Field::new("time", DataType::UInt64, false),
+        Field::new("version", DataType::UInt64, false),
         Field::new("address", DataType::FixedSizeBinary(32), false),
     ]);
 
@@ -172,7 +172,7 @@ async fn get_locked_hist(hist: DataFrame) -> Vec<(u64, u64)> {
     let mut balance_mem = 0;
 
     hist.collect().await.unwrap().iter().map(|batch| {
-        let timestamp = batch
+        let version = batch
             .column(0)
             .as_any()
             .downcast_ref::<UInt64Array>()
@@ -210,9 +210,9 @@ async fn get_locked_hist(hist: DataFrame) -> Vec<(u64, u64)> {
             };
 
             if unlocked <= balance {
-                (timestamp[index], balance - unlocked)
+                (version[index], balance - unlocked)
             } else {
-                (timestamp[index], 0)
+                (version[index], 0)
             }
         }).collect::<Vec<(u64, u64)>>()
     }).flatten().collect()
@@ -250,21 +250,29 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
     let slow_wallet = ctx.table("slow_wallet").await.unwrap();
 
     let timestamps = slow_wallet
-        .join(balance, JoinType::Full, &["time"], &["time"], None)
+        .join(
+            balance,
+            JoinType::Full,
+            &["version"],
+            &["version"],
+            None
+        )
         .unwrap()
         .select(vec![coalesce(vec![
-            col("slow_wallet.time"),
-            col("balance.time"),
+            col("slow_wallet.version"),
+            col("balance.version"),
         ])
-        .alias("timestamp")])
+        .alias("version")])
         .unwrap()
         .distinct()
         .unwrap()
-        .sort(vec![col("timestamp").sort(true, true)])
+        .sort(vec![col("version").sort(true, true)])
         .unwrap();
 
-    let schema = Schema::new(vec![Field::new("timestamp", DataType::UInt64, true)]);
-    let timestamps = MemTable::try_new(
+    let schema = Schema::new(vec![
+        Field::new("version", DataType::UInt64, true)
+    ]);
+    let versions = MemTable::try_new(
         Arc::new(schema),
         timestamps.collect_partitioned().await.unwrap(),
     )
@@ -272,13 +280,13 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
 
     ctx.register_table(
         TableReference::Bare {
-            table: "timestamps".into(),
+            table: "versions".into(),
         },
-        Arc::new(timestamps),
+        Arc::new(versions),
     )
     .unwrap();
 
-    let mut timestamps: Vec<u64> = ctx.table("timestamps").await.unwrap()
+    let mut versions: Vec<u64> = ctx.table("versions").await.unwrap()
         .collect()
         .await
         .unwrap()
@@ -295,7 +303,7 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
         .flatten()
         .collect();
 
-    let len = timestamps.len();
+    let len = versions.len();
     let mut total = vec![0f64; len];
 
     let df = ctx
@@ -350,56 +358,57 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
             .unwrap();
 
         let hist = slow_wallet
-            .join(balance, JoinType::Full, &["time"], &["time"], None)
+            .join(
+                balance,
+                JoinType::Full,
+                &["version"],
+                &["version"],
+                None
+            )
             .unwrap()
             .select(vec![
-                coalesce(vec![col("slow_wallet.time"), col("balance.time")]).alias("time"),
+                coalesce(vec![
+                    col("slow_wallet.version"),
+                    col("balance.version")
+                ]).alias("version"),
                 col("balance.value").alias("balance"),
                 col("slow_wallet.unlocked"),
             ])
             .unwrap()
-            .sort(vec![col("time").sort(true, true)])
+            .sort(vec![col("version").sort(true, true)])
             .unwrap();
 
         let mut i = 0;
         let mut prev = 0f64;
 
         let locked_hist = get_locked_hist(hist).await;
-        for (timestamp, locked) in locked_hist {
-            while timestamps[i] < timestamp {
+        for (version, locked) in locked_hist {
+            while versions[i] < version {
                 total[i] += prev;
                 i += 1;
             }
 
-            if timestamps[i] == timestamp {
+            if versions[i] == version {
                 prev = (locked as f64) / 1e6;
                 total[i] += prev;
                 i += 1;
             }
         }
 
-        while i < timestamps.len() {
+        while i < versions.len() {
             total[i] += prev;
             i += 1;
         }
     }
 
-    for i in 0..timestamps.len() {
-        if timestamps[i] == 0 {
-            timestamps[i] = V0_TIMESTAMP;
-        } else {
-            break;
-        }
+    let mut locked_coins = Vec::with_capacity(versions.len());
+    for i in 0..versions.len() {
+        locked_coins.push((versions[i], total[i]));
     }
 
-    let mut locked_coins = Vec::with_capacity(timestamps.len());
-    for i in 0..timestamps.len() {
-        locked_coins.push((timestamps[i], total[i]));
-    }
+    // let last_timestamp = timestamps.last().unwrap_or(&V0_TIMESTAMP);
 
-    let last_timestamp = timestamps.last().unwrap_or(&V0_TIMESTAMP);
-
-    let locked_coins = ol_data::resample(V0_TIMESTAMP, *last_timestamp, 3600, &locked_coins);
+    // let locked_coins = ol_data::resample(V0_TIMESTAMP, *last_timestamp, 3600, &locked_coins);
 
     axum::http::Response::builder()
         .status(StatusCode::OK)

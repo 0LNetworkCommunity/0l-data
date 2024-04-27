@@ -12,11 +12,10 @@ use datafusion::{
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
 
-use crate::{app_state::AppState, V0_TIMESTAMP};
+use crate::app_state::AppState;
 
 #[derive(Serialize, Deserialize)]
 struct Response {
-    timestamp: Vec<u64>,
     version: Vec<u64>,
     unlocked: Vec<u64>,
     balance: Vec<u64>,
@@ -40,8 +39,7 @@ async fn get_slow_wallet(app_state: &AppState, address: &str) -> MemTable {
             r#"
                 SELECT
                     toUInt64(tupleElement("entry", 2)) AS "unlocked",
-                    tupleElement("entry", 3) AS "time",
-                    tupleElement("entry", 4) AS "version"
+                    tupleElement("entry", 3) AS "version"
                 FROM (
                     SELECT
                         arrayElement(
@@ -51,7 +49,6 @@ async fn get_slow_wallet(app_state: &AppState, address: &str) -> MemTable {
                                     tuple(
                                         "change_index",
                                         "unlocked",
-                                        toUInt64(ceil("timestamp" / 1e6)),
                                         "version"
                                     )
                                 )
@@ -87,7 +84,6 @@ async fn get_slow_wallet(app_state: &AppState, address: &str) -> MemTable {
 
     let schema = Schema::new(vec![
         Field::new("unlocked", DataType::UInt64, false),
-        Field::new("time", DataType::UInt64, false),
         Field::new("version", DataType::UInt64, false),
     ]);
 
@@ -112,8 +108,7 @@ async fn get_historical_balance(app_state: &AppState, address: &str) -> MemTable
             r#"
                 SELECT
                     toUInt64(tupleElement("entry", 2)) AS "value",
-                    tupleElement("entry", 3) AS "version",
-                    tupleElement("entry", 4) AS "time"
+                    tupleElement("entry", 3) AS "version"
                 FROM (
                     SELECT
                         arrayElement(
@@ -123,8 +118,7 @@ async fn get_historical_balance(app_state: &AppState, address: &str) -> MemTable
                                     tuple(
                                         "change_index",
                                         "balance",
-                                        "version",
-                                        toUInt64(ceil("timestamp" / 1e6))
+                                        "version"
                                     )
                                 )
                             ),
@@ -160,7 +154,6 @@ async fn get_historical_balance(app_state: &AppState, address: &str) -> MemTable
     let schema = Schema::new(vec![
         Field::new("value", DataType::UInt64, false),
         Field::new("version", DataType::UInt64, false),
-        Field::new("time", DataType::UInt64, false),
     ]);
 
     MemTable::try_new(Arc::new(schema), vec![batches]).unwrap()
@@ -198,17 +191,12 @@ pub async fn get(
         .join(
             historical_balance,
             JoinType::Full,
-            &["time"],
-            &["time"],
+            &["version"],
+            &["version"],
             None,
         )
         .unwrap()
         .select(vec![
-            coalesce(vec![
-                col("historical_balance.time"),
-                col("slow_wallet.time"),
-            ])
-            .alias("time"),
             coalesce(vec![
                 col("historical_balance.version"),
                 col("slow_wallet.version"),
@@ -218,14 +206,13 @@ pub async fn get(
             col("historical_balance.value").alias("balance"),
         ])
         .unwrap()
-        .sort(vec![col("time").sort(true, true)])
+        .sort(vec![col("version").sort(true, true)])
         .unwrap();
 
     let mut unlocked_mem: Option<u64> = None;
     let mut balance_mem = 0;
 
     let schema = Schema::new(vec![
-        Field::new("time", DataType::UInt64, false),
         Field::new("version", DataType::UInt64, false),
         Field::new("unlocked", DataType::UInt64, true),
         Field::new("balance", DataType::UInt64, true),
@@ -237,7 +224,7 @@ pub async fn get(
         .unwrap()
         .iter()
         .map(|batch| {
-            let timestamp = batch
+            let version = batch
                 .column(0)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
@@ -245,16 +232,8 @@ pub async fn get(
                 .values()
                 .to_vec();
 
-            let version = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .expect("Failed to downcast time")
-                .values()
-                .to_vec();
-
             let unlocked_in = batch
-                .column(2)
+                .column(1)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("Failed to downcast unlocked")
@@ -262,7 +241,7 @@ pub async fn get(
                 .collect::<Vec<Option<u64>>>();
 
             let balance_in = batch
-                .column(3)
+                .column(2)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("Failed to downcast balance")
@@ -297,7 +276,6 @@ pub async fn get(
             let batch = RecordBatch::try_new(
                 Arc::new(schema.clone()),
                 vec![
-                    Arc::new(UInt64Array::from(timestamp)),
                     Arc::new(UInt64Array::from(version)),
                     Arc::new(UInt64Array::from(unlocked_out)),
                     Arc::new(UInt64Array::from(balance_out)),
@@ -309,7 +287,10 @@ pub async fn get(
         })
         .collect::<Vec<RecordBatch>>();
 
-    let table = MemTable::try_new(Arc::new(schema), vec![batches]).unwrap();
+    let table = MemTable::try_new(
+        Arc::new(schema),
+        vec![batches]
+    ).unwrap();
 
     let ctx = SessionContext::new();
 
@@ -325,7 +306,6 @@ pub async fn get(
         .sql(
             r#"
                 SELECT
-                    "time",
                     (
                         CASE
                             WHEN "unlocked" > "balance" THEN "balance"
@@ -346,26 +326,15 @@ pub async fn get(
         .await
         .unwrap();
 
-    let mut timestamp = Vec::new();
     let mut unlocked = Vec::new();
     let mut locked = Vec::new();
     let mut version = Vec::new();
     let mut balance = Vec::new();
 
     for batch in df.collect().await.unwrap() {
-        timestamp.append(
-            &mut batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .expect("Failed to downcast time")
-                .values()
-                .to_vec(),
-        );
-
         unlocked.append(
             &mut batch
-                .column(1)
+                .column(0)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("Failed to downcast unlocked")
@@ -375,7 +344,7 @@ pub async fn get(
 
         balance.append(
             &mut batch
-                .column(2)
+                .column(1)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("Failed to downcast balance")
@@ -385,7 +354,7 @@ pub async fn get(
 
         locked.append(
             &mut batch
-                .column(3)
+                .column(2)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("Failed to downcast balance")
@@ -395,7 +364,7 @@ pub async fn get(
 
         version.append(
             &mut batch
-                .column(4)
+                .column(3)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .expect("Failed to downcast balance")
@@ -404,20 +373,11 @@ pub async fn get(
         );
     }
 
-    for i in 0..timestamp.len() {
-        if timestamp[i] == 0 {
-            timestamp[i] = V0_TIMESTAMP as u64;
-        } else {
-            break;
-        }
-    }
-
     axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
         .body(
             serde_json::to_string(&Response {
-                timestamp,
                 unlocked,
                 balance,
                 locked,

@@ -4,7 +4,7 @@ use arrow_array::{Float64Array, UInt64Array};
 use axum::{http::StatusCode, response::IntoResponse, Extension};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::{app_state::AppState, V0_TIMESTAMP};
+use crate::app_state::AppState;
 
 pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoResponse {
     let params = &[("database", app_state.clickhouse_database.clone())];
@@ -19,7 +19,7 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
             r#"
                 SELECT
                     tupleElement("entry", 2) / 1e6 AS "value",
-                    tupleElement("entry", 3) AS "time"
+                    tupleElement("entry", 3) AS "version"
                 FROM (
                     SELECT
                     arrayElement(
@@ -29,15 +29,15 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
                                 tuple(
                                     "change_index",
                                     "amount",
-                                    toInt64(ceil("timestamp" / 1e6))
+                                    "version"
                                 )
                             )
                         ),
                         -1
                     ) AS "entry"
                     FROM "total_supply"
-                    GROUP BY ceil("timestamp" / 1e6)
-                    ORDER BY ceil("timestamp" / 1e6) ASC
+                    GROUP BY "version"
+                    ORDER BY "version" ASC
                 )
                 FORMAT Parquet
             "#,
@@ -68,7 +68,7 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
                 .values()
                 .to_vec();
 
-            let timestamps = batch
+            let versions = batch
                 .column(1)
                 .as_any()
                 .downcast_ref::<UInt64Array>()
@@ -77,20 +77,15 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
                 .to_vec();
 
             for i in 0..values.len() {
-                let timestamp = if timestamps[i] == 0 {
-                    V0_TIMESTAMP
-                } else {
-                    timestamps[i]
-                };
-                total_supply.push((timestamp, values[i]));
+                total_supply.push((versions[i], values[i]));
             }
         }
     }
 
-    let last_timestamp = total_supply.last().unwrap().0;
-    let last_timestamp = last_timestamp + (last_timestamp % 3600);
+    // let last_timestamp = total_supply.last().unwrap().0;
+    // let last_timestamp = last_timestamp + (last_timestamp % 3600);
 
-    let total_supply = ol_data::resample(V0_TIMESTAMP, last_timestamp, 3600, &total_supply);
+    // let total_supply = ol_data::resample(V0_TIMESTAMP, last_timestamp, 3600, &total_supply);
 
     axum::http::Response::builder()
         .status(StatusCode::OK)

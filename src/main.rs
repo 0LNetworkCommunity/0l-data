@@ -10,8 +10,6 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-const V0_TIMESTAMP: u64 = 1712696400;
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_state = AppState {
