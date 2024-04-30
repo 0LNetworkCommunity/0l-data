@@ -20,6 +20,285 @@ struct Response {
     unlocked: Vec<u64>,
     balance: Vec<u64>,
     locked: Vec<u64>,
+    timestamp: Vec<u64>,
+}
+
+async fn get_transactions_timestamps(
+    app_state: &AppState,
+    versions_in: &Vec<u64>,
+) -> (Vec<u64>, Vec<u64>) {
+    let params = &[
+        ("database", app_state.clickhouse_database.clone()),
+    ];
+
+    let qs = serde_urlencoded::to_string(params).unwrap();
+
+    let form = reqwest::multipart::Form::new()
+        .text(
+            "query",
+            r#"
+                SELECT "version", "timestamp"
+                FROM "block_metadata_transaction"
+                WHERE "version" IN {versions:Array(UInt64)}
+
+                UNION ALL
+
+                SELECT "version", "timestamp"
+                FROM "state_checkpoint_transaction"
+                WHERE "version" IN {versions:Array(UInt64)}
+
+                UNION ALL
+
+                SELECT "version", "timestamp"
+                FROM "user_transaction"
+                WHERE "version" IN {versions:Array(UInt64)}
+
+                FORMAT Parquet
+            "#
+        )
+        .text("param_versions", serde_json::to_string(versions_in).unwrap());
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(
+            format!(
+                "{}/?{}",
+                app_state.clickhouse_host.clone(),
+                qs,
+            )
+        )
+        .header("X-ClickHouse-User", app_state.clickhouse_username.clone())
+        .header("X-ClickHouse-Key", app_state.clickhouse_password.clone())
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(res)
+        .unwrap()
+        .with_batch_size(8192)
+        .build()
+        .unwrap();
+
+    let batches = parquet_reader
+        .into_iter()
+        .map(|it| it.unwrap())
+        .collect::<Vec<RecordBatch>>();
+
+    let mut version = Vec::new();
+    let mut timestamp = Vec::new();
+
+    for batch in batches {
+        version.append(
+            &mut batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast unlocked")
+                .values()
+                .to_vec(),
+        );
+
+        timestamp.append(
+            &mut batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast unlocked")
+                .values()
+                .to_vec(),
+        );
+    }
+
+    (version, timestamp)
+}
+
+async fn get_genesis_transactions(
+    app_state: &AppState,
+    versions: &Vec<u64>,
+) -> (Vec<u64>, Vec<u64>) {
+    if versions.len() == 0 {
+        return (vec![], vec![]);
+    }
+
+    let params = &[
+        ("database", app_state.clickhouse_database.clone()),
+        ("param_start", versions.first().unwrap().to_string()),
+        ("param_end", versions.last().unwrap().to_string()),
+    ];
+
+    let qs = serde_urlencoded::to_string(params).unwrap();
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{}/?{}", app_state.clickhouse_host.clone(), qs))
+        .header("X-ClickHouse-User", app_state.clickhouse_username.clone())
+        .header("X-ClickHouse-Key", app_state.clickhouse_password.clone())
+        .body(
+            r#"
+                SELECT "version"
+                FROM "genesis_transaction"
+                WHERE "version" BETWEEN {start:UInt64} AND {end:UInt64}
+                FORMAT Parquet
+            "#,
+        )
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(res)
+        .unwrap()
+        .with_batch_size(8192)
+        .build()
+        .unwrap();
+
+    let batches = parquet_reader
+        .into_iter()
+        .map(|it| it.unwrap())
+        .collect::<Vec<RecordBatch>>();
+
+    let mut version = Vec::new();
+
+    for batch in batches {
+        version.append(
+            &mut batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast unlocked")
+                .values()
+                .to_vec(),
+        );
+    }
+
+    if version.len() == 0 {
+        return (vec![], vec![]);
+    }
+
+    let next_versions = version.iter().map(|value| value + 1).collect::<Vec<_>>();
+
+    let params = &[
+        ("database", app_state.clickhouse_database.clone()),
+        ("param_versions", serde_json::to_string(&next_versions).unwrap()),
+    ];
+
+    let qs = serde_urlencoded::to_string(params).unwrap();
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{}/?{}", app_state.clickhouse_host.clone(), qs))
+        .header("X-ClickHouse-User", app_state.clickhouse_username.clone())
+        .header("X-ClickHouse-Key", app_state.clickhouse_password.clone())
+        .body(
+            r#"
+                SELECT "version", "timestamp"
+                FROM "block_metadata_transaction"
+                WHERE "version" IN {versions:Array(UInt64)}
+
+                UNION ALL
+
+                SELECT "version", "timestamp"
+                FROM "state_checkpoint_transaction"
+                WHERE "version" IN {versions:Array(UInt64)}
+
+                UNION ALL
+
+                SELECT "version", "timestamp"
+                FROM "user_transaction"
+                WHERE "version" IN {versions:Array(UInt64)}
+
+                FORMAT Parquet
+            "#,
+        )
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(res)
+        .unwrap()
+        .with_batch_size(8192)
+        .build()
+        .unwrap();
+
+    let batches = parquet_reader
+        .into_iter()
+        .map(|it| it.unwrap())
+        .collect::<Vec<RecordBatch>>();
+
+    let mut version = Vec::new();
+    let mut timestamp = Vec::new();
+
+    for batch in batches {
+        version.append(
+            &mut batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast unlocked")
+                .values()
+                .to_vec()
+                .iter()
+                .map(|value| value - 1)
+                .collect::<Vec<_>>(),
+        );
+
+        timestamp.append(
+            &mut batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast unlocked")
+                .values()
+                .to_vec()
+                .iter()
+                .map(|value| value - 1)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    return (version, timestamp);
+}
+
+async fn get_timestamps(app_state: &AppState, versions: &Vec<u64>) -> MemTable {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("version", DataType::UInt64, false),
+        Field::new("timestamp", DataType::UInt64, false),
+    ]));
+
+    let (version, timestamp) = get_genesis_transactions(app_state, versions).await;
+
+    let mut batches = vec![
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt64Array::from(version)),
+                Arc::new(UInt64Array::from(timestamp)),
+            ],
+        ).unwrap()
+    ];
+
+    let (version, timestamp) = get_transactions_timestamps(app_state, versions).await;
+
+    batches.push(
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt64Array::from(version)),
+                Arc::new(UInt64Array::from(timestamp)),
+            ],
+        ).unwrap()
+    );
+
+    MemTable::try_new(schema.clone(), vec![batches]).unwrap()
 }
 
 async fn get_slow_wallet(app_state: &AppState, address: &str) -> MemTable {
@@ -32,7 +311,7 @@ async fn get_slow_wallet(app_state: &AppState, address: &str) -> MemTable {
 
     let client = reqwest::Client::new();
     let res = client
-        .post(format!("{}/?{}", app_state.clickhouse_host.clone(), qs,))
+        .post(format!("{}/?{}", app_state.clickhouse_host.clone(), qs))
         .header("X-ClickHouse-User", app_state.clickhouse_username.clone())
         .header("X-ClickHouse-Key", app_state.clickhouse_password.clone())
         .body(
@@ -321,6 +600,7 @@ pub async fn get(
                     ) as "locked",
                     "version"
                 FROM "history"
+                ORDER BY "version" ASC
             "#,
         )
         .await
@@ -330,6 +610,7 @@ pub async fn get(
     let mut locked = Vec::new();
     let mut version = Vec::new();
     let mut balance = Vec::new();
+    let mut timestamp = Vec::new();
 
     for batch in df.collect().await.unwrap() {
         unlocked.append(
@@ -373,6 +654,44 @@ pub async fn get(
         );
     }
 
+    let timestamp_table = get_timestamps(&state, &version).await;
+
+    ctx.register_table(
+        TableReference::Bare {
+            table: "timestamp".into(),
+        },
+        Arc::new(timestamp_table),
+    )
+    .unwrap();
+
+    let df = ctx
+        .sql(
+            r#"
+                SELECT
+                    "history"."version",
+                    "timestamp"."timestamp"
+                FROM "history"
+                INNER JOIN "timestamp" ON "timestamp"."version" = "history"."version"
+                ORDER BY "history"."version" ASC
+            "#,
+        )
+        .await
+        .unwrap();
+
+    for batch in df.collect().await.unwrap() {
+        timestamp.append(
+            &mut batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast balance")
+                .values()
+                .to_vec(),
+        );
+    }
+
+    assert_eq!(version.len(), timestamp.len());
+
     axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -382,6 +701,7 @@ pub async fn get(
                 balance,
                 locked,
                 version,
+                timestamp,
             })
             .unwrap(),
         )
