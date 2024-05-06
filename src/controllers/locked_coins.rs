@@ -1,10 +1,4 @@
-use std::{
-    sync::Arc,
-    vec,
-};
-use arrow_array::{
-     FixedSizeBinaryArray, RecordBatch, UInt64Array,
-};
+use arrow_array::{FixedSizeBinaryArray, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use axum::{http::StatusCode, response::IntoResponse, Extension};
 use datafusion::{
@@ -18,6 +12,7 @@ use datafusion::{
 use ethereum_types::U256;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Serialize;
+use std::{sync::Arc, vec};
 
 use crate::{app_state::AppState, V0_TIMESTAMP};
 
@@ -171,51 +166,61 @@ async fn get_locked_hist(hist: DataFrame) -> Vec<(u64, u64)> {
     let mut unlocked_mem: Option<u64> = None;
     let mut balance_mem = 0;
 
-    hist.collect().await.unwrap().iter().map(|batch| {
-        let timestamp = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .expect("Failed to downcast time")
-            .values()
-            .to_vec();
+    hist.collect()
+        .await
+        .unwrap()
+        .iter()
+        .map(|batch| {
+            let timestamp = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast time")
+                .values()
+                .to_vec();
 
-        let balance_col = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .expect("Failed to downcast unlocked")
-            .into_iter()
-            .collect::<Vec<Option<u64>>>();
+            let balance_col = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast unlocked")
+                .into_iter()
+                .collect::<Vec<Option<u64>>>();
 
-        let unlocked_col = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .expect("Failed to downcast unlocked")
-            .into_iter()
-            .collect::<Vec<Option<u64>>>();
+            let unlocked_col = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast unlocked")
+                .into_iter()
+                .collect::<Vec<Option<u64>>>();
 
-        balance_col.iter().enumerate().map(|(index, balance)| {
-            let balance = balance.unwrap_or(balance_mem);
-            balance_mem = balance;
+            balance_col
+                .iter()
+                .enumerate()
+                .map(|(index, balance)| {
+                    let balance = balance.unwrap_or(balance_mem);
+                    balance_mem = balance;
 
-            let unlocked = if let Some(unlocked_value) = unlocked_col[index] {
-                unlocked_mem = Some(unlocked_value);
-                unlocked_value
-            } else if let Some(unlocked_mem) = unlocked_mem {
-                unlocked_mem
-            } else {
-                balance_mem
-            };
+                    let unlocked = if let Some(unlocked_value) = unlocked_col[index] {
+                        unlocked_mem = Some(unlocked_value);
+                        unlocked_value
+                    } else if let Some(unlocked_mem) = unlocked_mem {
+                        unlocked_mem
+                    } else {
+                        balance_mem
+                    };
 
-            if unlocked <= balance {
-                (timestamp[index], balance - unlocked)
-            } else {
-                (timestamp[index], 0)
-            }
-        }).collect::<Vec<(u64, u64)>>()
-    }).flatten().collect()
+                    if unlocked <= balance {
+                        (timestamp[index], balance - unlocked)
+                    } else {
+                        (timestamp[index], 0)
+                    }
+                })
+                .collect::<Vec<(u64, u64)>>()
+        })
+        .flatten()
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -278,7 +283,10 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
     )
     .unwrap();
 
-    let mut timestamps: Vec<u64> = ctx.table("timestamps").await.unwrap()
+    let mut timestamps: Vec<u64> = ctx
+        .table("timestamps")
+        .await
+        .unwrap()
         .collect()
         .await
         .unwrap()
@@ -397,16 +405,12 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
         locked_coins.push((timestamps[i], total[i]));
     }
 
-    let last_timestamp = timestamps.last().unwrap_or(&V0_TIMESTAMP);
-
-    let locked_coins = ol_data::resample(V0_TIMESTAMP, *last_timestamp, 3600, &locked_coins);
+    // let last_timestamp = timestamps.last().unwrap_or(&V0_TIMESTAMP);
+    // let locked_coins = ol_data::resample(V0_TIMESTAMP, *last_timestamp, 3600, &locked_coins);
 
     axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(
-            serde_json::to_string(&&locked_coins)
-            .unwrap(),
-        )
+        .body(serde_json::to_string(&&locked_coins).unwrap())
         .unwrap()
 }

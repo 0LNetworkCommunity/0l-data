@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.11" }
+reqwest = { version = "0.11", features = ["multipart"]}
 axum = "0.7"
 tower-http = { version = "0.5", features = ["trace", "cors", "compression-full"] }
 serde = { version = "1.0", features = ["derive"] }

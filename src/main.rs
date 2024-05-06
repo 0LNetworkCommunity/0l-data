@@ -26,10 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // build our application with a single route
     let app = Router::new()
         .route("/total-supply", get(controllers::total_supply::get))
-        .route(
-            "/locked-coins",
-            get(controllers::locked_coins::get),
-        )
+        .route("/locked-coins", get(controllers::locked_coins::get))
         .route(
             "/historical-balance/:address",
             get(controllers::historical_balance::get),

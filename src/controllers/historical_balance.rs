@@ -1,4 +1,9 @@
-use std::sync::Arc;
+use core::time;
+use std::{
+    collections::HashSet,
+    ops::{Mul, Rem, Sub},
+    sync::Arc,
+};
 
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
@@ -6,7 +11,7 @@ use axum::{extract::Path, http::StatusCode, response::IntoResponse, Extension};
 use datafusion::{
     datasource::MemTable,
     execution::context::SessionContext,
-    logical_expr::{coalesce, col, JoinType},
+    logical_expr::{coalesce, col, lit, try_cast, JoinType},
     sql::TableReference,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -161,6 +166,75 @@ async fn get_historical_balance(app_state: &AppState, address: &str) -> MemTable
         Field::new("value", DataType::UInt64, false),
         Field::new("version", DataType::UInt64, false),
         Field::new("time", DataType::UInt64, false),
+    ]);
+
+    MemTable::try_new(Arc::new(schema), vec![batches]).unwrap()
+}
+
+async fn get_usd_rate(app_state: &AppState, timestamps: &Vec<u64>) -> MemTable {
+    println!(">> {:?}", timestamps);
+
+    let qs = serde_urlencoded::to_string(&[("database", app_state.clickhouse_database.clone())])
+        .unwrap();
+
+    let client = reqwest::Client::new();
+
+    let form = reqwest::multipart::Form::new()
+        .text(
+            "param_timestamps",
+            serde_json::to_string(&timestamps).unwrap(),
+        )
+        .text(
+            "query",
+            r#"
+                SELECT
+                    "timestamp"::UInt64 as "timestamp",
+                    any("close")::Float64 as "close"
+                FROM "ol_swap_1h"
+                WHERE
+                    "timestamp" IN
+                    {timestamps: Array(UInt64)}
+
+                GROUP BY
+                    "timestamp"
+                FORMAT Parquet
+            "#
+            .to_owned(),
+        );
+
+    let res = client
+        .post(format!("{}/?{}", app_state.clickhouse_host.clone(), qs))
+        .header("X-ClickHouse-User", app_state.clickhouse_username.clone())
+        .header("X-ClickHouse-Key", app_state.clickhouse_password.clone())
+        .multipart(form)
+        // .body(qs)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    println!("OK!!! > {}", res.len());
+
+    let batches = if res.is_empty() {
+        vec![]
+    } else {
+        let parquet_reader = ParquetRecordBatchReaderBuilder::try_new(res)
+            .unwrap()
+            .with_batch_size(8192)
+            .build()
+            .unwrap();
+
+        parquet_reader
+            .into_iter()
+            .map(|it| it.unwrap())
+            .collect::<Vec<RecordBatch>>()
+    };
+
+    let schema = Schema::new(vec![
+        Field::new("timestamp", DataType::UInt64, false),
+        Field::new("close", DataType::Float64, false),
     ]);
 
     MemTable::try_new(Arc::new(schema), vec![batches]).unwrap()
@@ -321,6 +395,36 @@ pub async fn get(
     )
     .unwrap();
 
+    let history = ctx.table("history").await.unwrap();
+
+    let df = history
+        .select(vec![try_cast(
+            col("time").sub(col("time").rem(lit(3600))),
+            DataType::UInt64,
+        )
+        .mul(lit(1000u64))
+        .alias("timestamp")])
+        .unwrap()
+        .distinct()
+        .unwrap()
+        .sort(vec![col("timestamp").sort(true, true)])
+        .unwrap();
+
+    df.clone().show().await.unwrap();
+
+    let mut timestamp = Vec::new();
+    for batch in df.collect().await.unwrap() {
+        timestamp.append(
+            &mut batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("Failed to downcast time")
+                .values()
+                .to_vec(),
+        );
+    }
+
     let df = ctx
         .sql(
             r#"
@@ -411,6 +515,75 @@ pub async fn get(
             break;
         }
     }
+
+    let mut usd_rate_timestamp = timestamp.clone();
+    usd_rate_timestamp.dedup();
+    for value in &mut usd_rate_timestamp {
+        *value = (*value - *value % 3600) * 1000;
+    }
+
+    println!("register_table");
+    ctx.register_table(
+        TableReference::Bare {
+            table: "usd_rate".into(),
+        },
+        Arc::new(get_usd_rate(&state, &usd_rate_timestamp).await),
+    )
+    .unwrap();
+    println!("register_table ok");
+
+    let schema = Schema::new(vec![Field::new("timestamp", DataType::UInt64, false)]);
+
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![Arc::new(UInt64Array::from(timestamp.clone()))],
+    )
+    .unwrap();
+
+    let timestamp_table = MemTable::try_new(Arc::new(schema), vec![vec![batch]]).unwrap();
+
+    ctx.register_table(
+        TableReference::Bare {
+            table: "timestamp".into(),
+        },
+        Arc::new(timestamp_table),
+    )
+    .unwrap();
+
+
+    let usd_rate_table = ctx.table("usd_rate").await.unwrap();
+
+    let timestamp_table = ctx.table("timestamp").await.unwrap();
+    let df = timestamp_table
+    // .join(usd_rate, JoinType::Left, "timestamp", right_cols, filter)
+    .select(vec![
+        col("timestamp")
+    ]).unwrap();
+    df.show().await.unwrap();
+
+    let df = ctx.table("timestamp").await.unwrap()
+        .select(vec![
+            col("timestamp"),
+            try_cast(
+                col("timestamp").sub(col("timestamp").rem(lit(3600))),
+                DataType::UInt64,
+            )
+            .mul(lit(1000u64)).alias("time")
+        ]).unwrap()
+        .join(
+            usd_rate_table,
+            JoinType::Left,
+            &["time"],
+            &["timestamp"],
+            None
+        ).unwrap()
+        .select(vec![
+            col("timestamp.timestamp"),
+            col("time"),
+            col("close"),
+        ]).unwrap();
+
+    df.show().await.unwrap();
 
     axum::http::Response::builder()
         .status(StatusCode::OK)
