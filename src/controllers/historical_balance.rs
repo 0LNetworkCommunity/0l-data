@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, ops::Div};
 
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
@@ -6,7 +6,7 @@ use axum::{extract::Path, http::StatusCode, response::IntoResponse, Extension};
 use datafusion::{
     datasource::MemTable,
     execution::context::SessionContext,
-    logical_expr::{coalesce, col, JoinType},
+    logical_expr::{cast, coalesce, col, lit, JoinType},
     sql::TableReference,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -665,18 +665,18 @@ pub async fn get(
     .unwrap();
 
     let df = ctx
-        .sql(
-            r#"
-                SELECT
-                    "history"."version",
-                    "timestamp"."timestamp"
-                FROM "history"
-                INNER JOIN "timestamp" ON "timestamp"."version" = "history"."version"
-                ORDER BY "history"."version" ASC
-            "#,
-        )
-        .await
-        .unwrap();
+        .table("history").await.unwrap()
+        .join(
+            ctx.table("timestamp").await.unwrap(),
+            JoinType::Inner,
+            &["version"],
+            &["version"],
+            None
+        ).unwrap()
+        .select(vec![
+            col("timestamp.timestamp").div(lit(1_000_000u64)).alias("timestamp")
+        ]).unwrap()
+        .sort(vec![col("history.version").sort(true, true)]).unwrap();
 
     for batch in df.collect().await.unwrap() {
         timestamp.append(

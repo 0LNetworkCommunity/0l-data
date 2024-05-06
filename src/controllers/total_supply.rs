@@ -82,11 +82,6 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
         }
     }
 
-    // let last_timestamp = total_supply.last().unwrap().0;
-    // let last_timestamp = last_timestamp + (last_timestamp % 3600);
-
-    // let total_supply = ol_data::resample(V0_TIMESTAMP, last_timestamp, 3600, &total_supply);
-
     axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "application/json")

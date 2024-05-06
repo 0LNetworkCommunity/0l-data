@@ -3,7 +3,7 @@ use std::{
     vec,
 };
 use arrow_array::{
-     FixedSizeBinaryArray, RecordBatch, UInt64Array,
+    FixedSizeBinaryArray, RecordBatch, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use axum::{http::StatusCode, response::IntoResponse, Extension};
@@ -17,7 +17,6 @@ use datafusion::{
 };
 use ethereum_types::U256;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use serde::Serialize;
 
 use crate::app_state::AppState;
 
@@ -218,12 +217,6 @@ async fn get_locked_hist(hist: DataFrame) -> Vec<(u64, u64)> {
     }).flatten().collect()
 }
 
-#[derive(Serialize)]
-struct Res {
-    timestamps: Vec<u64>,
-    locked: Vec<f64>,
-}
-
 pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoResponse {
     let balance = get_slow_wallet_balances(&app_state).await;
     let slow_wallet = get_slow_wallet(&app_state).await;
@@ -258,11 +251,17 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
             None
         )
         .unwrap()
-        .select(vec![coalesce(vec![
-            col("slow_wallet.version"),
-            col("balance.version"),
-        ])
-        .alias("version")])
+        .select(
+            vec![
+                coalesce(
+                    vec![
+                        col("slow_wallet.version"),
+                        col("balance.version"),
+                    ]
+                )
+                .alias("version")
+            ]
+        )
         .unwrap()
         .distinct()
         .unwrap()
@@ -286,7 +285,7 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
     )
     .unwrap();
 
-    let mut versions: Vec<u64> = ctx.table("versions").await.unwrap()
+    let versions: Vec<u64> = ctx.table("versions").await.unwrap()
         .collect()
         .await
         .unwrap()
@@ -307,11 +306,7 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
     let mut total = vec![0f64; len];
 
     let df = ctx
-        .sql(
-            r#"
-              select distinct address from slow_wallet
-            "#,
-        )
+        .sql("SELECT DISTINCT address FROM slow_wallet")
         .await
         .unwrap();
 
@@ -405,10 +400,6 @@ pub async fn get(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoRes
     for i in 0..versions.len() {
         locked_coins.push((versions[i], total[i]));
     }
-
-    // let last_timestamp = timestamps.last().unwrap_or(&V0_TIMESTAMP);
-
-    // let locked_coins = ol_data::resample(V0_TIMESTAMP, *last_timestamp, 3600, &locked_coins);
 
     axum::http::Response::builder()
         .status(StatusCode::OK)
