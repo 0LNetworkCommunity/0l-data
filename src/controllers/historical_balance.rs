@@ -37,21 +37,27 @@ async fn get_transactions_timestamps(
         .text(
             "query",
             r#"
-                SELECT "version", "timestamp"
-                FROM "block_metadata_transaction"
-                WHERE "version" IN {versions:Array(UInt64)}
+                    SELECT "version", "timestamp"
+                    FROM "block_metadata_transaction"
+                    WHERE "version" IN {versions:Array(UInt64)}
 
                 UNION ALL
 
-                SELECT "version", "timestamp"
-                FROM "state_checkpoint_transaction"
-                WHERE "version" IN {versions:Array(UInt64)}
+                    SELECT "version", "timestamp"
+                    FROM "state_checkpoint_transaction"
+                    WHERE "version" IN {versions:Array(UInt64)}
 
                 UNION ALL
 
-                SELECT "version", "timestamp"
-                FROM "user_transaction"
-                WHERE "version" IN {versions:Array(UInt64)}
+                    SELECT "version", "timestamp"
+                    FROM "user_transaction"
+                    WHERE "version" IN {versions:Array(UInt64)}
+
+                UNION ALL
+
+                    SELECT "version", "timestamp"
+                    FROM "script"
+                    WHERE "version" IN {versions:Array(UInt64)}
 
                 FORMAT Parquet
             "#
