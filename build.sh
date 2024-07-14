@@ -1,7 +1,7 @@
 #!/bin/bash
 
 COMMIT_HASH="$(git describe --always --abbrev=64)"
-CONTAINER_REGISTRY="ghcr.io/0lnetworkcommunity/0l-data"
+CONTAINER_REGISTRY="ghcr.io/minaxolone/0l-data"
 OL_DATA_IMAGE_TAG="$CONTAINER_REGISTRY:$COMMIT_HASH"
 
 docker build . \
